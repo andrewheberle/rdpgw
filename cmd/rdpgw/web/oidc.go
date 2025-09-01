@@ -64,18 +64,14 @@ func (h *OIDC) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := struct {
-		OAuth2Token   *oauth2.Token
-		IDTokenClaims *json.RawMessage // ID Token payload is just JSON.
-	}{oauth2Token, new(json.RawMessage)}
-
-	if err := idToken.Claims(&resp.IDTokenClaims); err != nil {
+	claims := new(json.RawMessage)
+	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	var data map[string]interface{}
-	if err := json.Unmarshal(*resp.IDTokenClaims, &data); err != nil {
+	if err := json.Unmarshal(*claims, &data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
