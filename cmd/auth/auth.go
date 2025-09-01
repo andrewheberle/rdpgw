@@ -1,9 +1,16 @@
+//go:build !windows
+
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net"
+	"os"
+	"syscall"
+
 	"github.com/bolkedebruin/rdpgw/cmd/auth/config"
 	"github.com/bolkedebruin/rdpgw/cmd/auth/database"
 	"github.com/bolkedebruin/rdpgw/cmd/auth/ntlm"
@@ -11,10 +18,6 @@ import (
 	"github.com/msteinert/pam/v2"
 	"github.com/thought-machine/go-flags"
 	"google.golang.org/grpc"
-	"log"
-	"net"
-	"os"
-	"syscall"
 )
 
 const (
@@ -24,14 +27,14 @@ const (
 var opts struct {
 	ServiceName string `short:"n" long:"name" default:"rdpgw" description:"the PAM service name to use"`
 	SocketAddr  string `short:"s" long:"socket" default:"/tmp/rdpgw-auth.sock" description:"the location of the socket"`
-	ConfigFile string `short:"c" long:"conf" default:"rdpgw-auth.yaml" description:"users config file for NTLM (yaml)"`
+	ConfigFile  string `short:"c" long:"conf" default:"rdpgw-auth.yaml" description:"users config file for NTLM (yaml)"`
 }
 
 type AuthServiceImpl struct {
 	auth.UnimplementedAuthenticateServer
 
 	serviceName string
-	ntlm *ntlm.NTLMAuth
+	ntlm        *ntlm.NTLMAuth
 }
 
 var conf config.Configuration
@@ -40,7 +43,7 @@ var _ auth.AuthenticateServer = (*AuthServiceImpl)(nil)
 func NewAuthService(serviceName string, database database.Database) auth.AuthenticateServer {
 	s := &AuthServiceImpl{
 		serviceName: serviceName,
-		ntlm: ntlm.NewNTLMAuth(database),
+		ntlm:        ntlm.NewNTLMAuth(database),
 	}
 	return s
 }
