@@ -38,12 +38,14 @@ type Config struct {
 	TemplateFile       string
 	RdpSigningCert     string
 	RdpSigningKey      string
+	SessionStore       *SessionStore
 }
 
 type RdpOpts struct {
-	UsernameTemplate string
-	SplitUserDomain  bool
-	NoUsername       bool
+	UsernameTemplate   string
+	SplitUserDomain    bool
+	NoUsername         bool
+	AllowQueryUsername bool
 }
 
 type Handler struct {
@@ -58,6 +60,8 @@ type Handler struct {
 	rdpOpts            RdpOpts
 	rdpDefaults        string
 	rdpSigner          *rdpsign.Signer
+	sessionStore       *SessionStore
+	maxAge             int
 }
 
 func (c *Config) NewHandler() *Handler {
@@ -76,6 +80,7 @@ func (c *Config) NewHandler() *Handler {
 		hostSelection:      c.HostSelection,
 		rdpOpts:            c.RdpOpts,
 		rdpDefaults:        c.TemplateFile,
+		sessionStore:       c.SessionStore,
 	}
 
 	// set up RDP signer if config values are set
@@ -95,6 +100,20 @@ func (h *Handler) selectRandomHost() string {
 	r := rnd.New(rnd.NewSource(int64(new(maphash.Hash).Sum64())))
 	host := h.hosts[r.Intn(len(h.hosts))]
 	return host
+}
+
+func (h *Handler) getUser(ctx context.Context, u *url.URL) (string, error) {
+	users, ok := u.Query()["user"]
+	if !ok {
+		return "", nil
+	}
+
+	switch h.hostSelection {
+	case hostselection.Signed, hostselection.AnySigned:
+		return h.queryInfo(ctx, users[0], h.queryTokenIssuer)
+	default:
+		return users[0], nil
+	}
 }
 
 func (h *Handler) getHost(ctx context.Context, u *url.URL) (string, error) {
@@ -169,28 +188,44 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	// determine host to connect to
 	host, err := h.getHost(ctx, r.URL)
 	if err != nil {
+		log.Printf("unable to get host from query string due to %s", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	host = strings.Replace(host, "{{ preferred_username }}", id.UserName(), 1)
+	user := id.UserName()
 
-	// split the username into user and domain
-	var user = id.UserName()
-	var domain = ""
+	render := user
+	// if allowed try to set username based on query string value
+	if opts.AllowQueryUsername {
+		u, err := h.getUser(ctx, r.URL)
+		if err != nil {
+			log.Printf("unable to get user from query string due to %s", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+
+		// if set then use it
+		if u != "" && u != render {
+			render = u
+			log.Printf("original username %s changed to %s based on query string parameter", user, render)
+		}
+	}
+
+	var domain string
+	// split username if set
 	if opts.SplitUserDomain {
-		creds := strings.SplitN(id.UserName(), "@", 2)
-		user = creds[0]
+		creds := strings.SplitN(render, "@", 2)
+		render = creds[0]
 		if len(creds) > 1 {
 			domain = creds[1]
 		}
 	}
 
-	render := user
 	if opts.UsernameTemplate != "" {
-		render = fmt.Sprint(h.rdpOpts.UsernameTemplate)
+		render = fmt.Sprint(opts.UsernameTemplate)
 		render = strings.Replace(render, "{{ username }}", user, 1)
-		if h.rdpOpts.UsernameTemplate == render {
-			log.Printf("Invalid username template. %s == %s", h.rdpOpts.UsernameTemplate, user)
+		if opts.UsernameTemplate == render {
+			log.Printf("Invalid username template. %s == %s", opts.UsernameTemplate, user)
 			http.Error(w, errors.New("invalid server configuration").Error(), http.StatusInternalServerError)
 			return
 		}
@@ -238,7 +273,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !h.rdpOpts.NoUsername {
+	if !opts.NoUsername {
 		d.Settings.Username = render
 		if domain != "" {
 			d.Settings.Domain = domain

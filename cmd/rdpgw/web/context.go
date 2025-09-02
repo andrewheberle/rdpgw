@@ -1,17 +1,18 @@
 package web
 
 import (
-	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
-	"github.com/jcmturner/goidentity/v6"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
+	"github.com/jcmturner/goidentity/v6"
 )
 
-func EnrichContext(next http.Handler) http.Handler {
+func (h *Handler) EnrichContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, err := GetSessionIdentity(r)
+		id, err := h.sessionStore.GetSessionIdentity(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -19,7 +20,7 @@ func EnrichContext(next http.Handler) http.Handler {
 
 		if id == nil {
 			id = identity.NewUser()
-			if err := SaveSessionIdentity(r, w, id); err != nil {
+			if err := h.sessionStore.SaveSessionIdentity(r, w, id); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}

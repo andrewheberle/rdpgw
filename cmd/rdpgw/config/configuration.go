@@ -44,6 +44,7 @@ type ServerConfig struct {
 	SessionKey           string   `koanf:"sessionkey"`
 	SessionEncryptionKey string   `koanf:"sessionencryptionkey"`
 	SessionStore         string   `koanf:"sessionstore"`
+	MaxSessionAge        int      `koanf:"maxsessionage"`
 	MaxSessionLength     int      `koanf:"maxsessionlength"`
 	SendBuf              int      `koanf:"sendbuf"`
 	ReceiveBuf           int      `koanf:"receivebuf"`
@@ -91,11 +92,12 @@ type SecurityConfig struct {
 type ClientConfig struct {
 	Defaults string `koanf:"defaults"`
 	// kept for backwards compatibility
-	UsernameTemplate string `koanf:"usernametemplate"`
-	SplitUserDomain  bool   `koanf:"splituserdomain"`
-	NoUsername       bool   `koanf:"nousername"`
-	SigningCert      string `koanf:"signingcert"`
-	SigningKey       string `koanf:"signingkey"`
+	UsernameTemplate   string `koanf:"usernametemplate"`
+	SplitUserDomain    bool   `koanf:"splituserdomain"`
+	NoUsername         bool   `koanf:"nousername"`
+	SigningCert        string `koanf:"signingcert"`
+	SigningKey         string `koanf:"signingkey"`
+	AllowQueryUsername bool   `koanf:"allowqueryusername"`
 }
 
 func ToCamel(s string) string {

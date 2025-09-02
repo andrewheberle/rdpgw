@@ -37,7 +37,7 @@ var opts struct {
 
 var conf config.Configuration
 
-func initOIDC(callbackUrl *url.URL) *web.OIDC {
+func initOIDC(callbackUrl *url.URL, store *web.SessionStore) *web.OIDC {
 	// set oidc config
 	provider, err := oidc.NewProvider(context.Background(), conf.OpenId.ProviderUrl)
 	if err != nil {
@@ -61,6 +61,7 @@ func initOIDC(callbackUrl *url.URL) *web.OIDC {
 	o := web.OIDCConfig{
 		OAuth2Config:      &oauthConfig,
 		OIDCTokenVerifier: verifier,
+		SessionStore:      store,
 	}
 
 	return o.New()
@@ -95,11 +96,15 @@ func main() {
 	security.Hosts = conf.Server.Hosts
 
 	// init session store
-	web.InitStore([]byte(conf.Server.SessionKey),
+	sessionStore, err := web.InitStore([]byte(conf.Server.SessionKey),
 		[]byte(conf.Server.SessionEncryptionKey),
 		conf.Server.SessionStore,
 		conf.Server.MaxSessionLength,
+		conf.Server.MaxSessionAge,
 	)
+	if err != nil {
+		log.Fatalf("Could not set up session store due to %s", err)
+	}
 
 	// configure web backend
 	w := &web.Config{
@@ -109,14 +114,16 @@ func main() {
 		Hosts:            conf.Server.Hosts,
 		HostSelection:    conf.Server.HostSelection,
 		RdpOpts: web.RdpOpts{
-			UsernameTemplate: conf.Client.UsernameTemplate,
-			SplitUserDomain:  conf.Client.SplitUserDomain,
-			NoUsername:       conf.Client.NoUsername,
+			UsernameTemplate:   conf.Client.UsernameTemplate,
+			SplitUserDomain:    conf.Client.SplitUserDomain,
+			NoUsername:         conf.Client.NoUsername,
+			AllowQueryUsername: conf.Client.AllowQueryUsername,
 		},
 		GatewayAddress: url,
 		TemplateFile:   conf.Client.Defaults,
 		RdpSigningCert: conf.Client.SigningCert,
 		RdpSigningKey:  conf.Client.SigningKey,
+		SessionStore:   sessionStore,
 	}
 
 	if conf.Caps.TokenAuth {
@@ -205,7 +212,7 @@ func main() {
 	r := mux.NewRouter()
 
 	// ensure identity is set in context and get some extra info
-	r.Use(web.EnrichContext)
+	r.Use(h.EnrichContext)
 
 	// prometheus metrics
 	r.Handle("/metrics", promhttp.Handler())
@@ -219,7 +226,7 @@ func main() {
 	// openid
 	if conf.Server.OpenIDEnabled() {
 		log.Printf("enabling openid extended authentication")
-		o := initOIDC(url)
+		o := initOIDC(url, sessionStore)
 		r.Handle("/connect", o.Authenticated(http.HandlerFunc(h.HandleDownload)))
 		r.HandleFunc("/callback", o.HandleCallback)
 

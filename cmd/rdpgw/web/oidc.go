@@ -22,11 +22,13 @@ type OIDC struct {
 	oAuth2Config      *oauth2.Config
 	oidcTokenVerifier *oidc.IDTokenVerifier
 	stateStore        *cache.Cache
+	sessionStore      *SessionStore
 }
 
 type OIDCConfig struct {
 	OAuth2Config      *oauth2.Config
 	OIDCTokenVerifier *oidc.IDTokenVerifier
+	SessionStore      *SessionStore
 }
 
 func (c *OIDCConfig) New() *OIDC {
@@ -34,6 +36,7 @@ func (c *OIDCConfig) New() *OIDC {
 		oAuth2Config:      c.OAuth2Config,
 		oidcTokenVerifier: c.OIDCTokenVerifier,
 		stateStore:        cache.New(CacheExpiration, CleanupInterval),
+		sessionStore:      c.SessionStore,
 	}
 }
 
@@ -88,7 +91,7 @@ func (h *OIDC) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	id.SetAuthTime(time.Now())
 	id.SetAttribute(identity.AttrAccessToken, oauth2Token.AccessToken)
 
-	if err := SaveSessionIdentity(r, w, id); err != nil {
+	if err := h.sessionStore.SaveSessionIdentity(r, w, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
