@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"time"
@@ -28,14 +28,17 @@ type Processor struct {
 
 	// ctl is a channel to control the processor in case of events
 	ctl chan int
+
+	logger *slog.Logger
 }
 
-func NewProcessor(gw *Gateway, tunnel *Tunnel) *Processor {
+func NewProcessor(gw *Gateway, tunnel *Tunnel, logger *slog.Logger) *Processor {
 	h := &Processor{
 		gw:     gw,
 		state:  SERVER_STATE_INITIALIZED,
 		tunnel: tunnel,
 		ctl:    make(chan int),
+		logger: logger,
 	}
 	return h
 }
@@ -47,20 +50,20 @@ func (p *Processor) Process(ctx context.Context) error {
 		//pt, sz, pkt, err := p.tunnel.Read()
 		messages, err := p.tunnel.Read()
 		if err != nil {
-			log.Printf("Cannot read message from stream %p", err)
+			p.logger.Error("Cannot read message from stream", "error", err)
 			return err
 		}
 
 		for _, message := range messages {
 			if message.err != nil {
-				log.Printf("Cannot read message from stream %p", err)
+				p.logger.Error("Cannot read message from stream", "error", err)
 				continue
 			}
 			switch message.packetType {
 			case PKT_TYPE_HANDSHAKE_REQUEST:
-				log.Printf("Client handshakeRequest from %s", p.tunnel.User.GetAttribute(identity.AttrClientIp))
+				p.logger.Info("Client handshakeRequest", "client", p.tunnel.User.GetAttribute(identity.AttrClientIp))
 				if p.state != SERVER_STATE_INITIALIZED {
-					log.Printf("Handshake attempted while in wrong state %d != %d", p.state, SERVER_STATE_INITIALIZED)
+					p.logger.Error("Handshake attempted while in wrong state", "state", p.state, "expected", SERVER_STATE_INITIALIZED)
 					msg := p.handshakeResponse(0x0, 0x0, 0, E_PROXY_INTERNALERROR)
 					p.tunnel.Write(msg)
 					return fmt.Errorf("%x: wrong state", E_PROXY_INTERNALERROR)
@@ -68,7 +71,7 @@ func (p *Processor) Process(ctx context.Context) error {
 				major, minor, _, reqAuth := p.handshakeRequest(message.msg)
 				caps, err := p.matchAuth(reqAuth)
 				if err != nil {
-					log.Println(err)
+					p.logger.Error("could not match capabilities", "error", err)
 					msg := p.handshakeResponse(0x0, 0x0, 0, E_PROXY_CAPABILITYMISMATCH)
 					p.tunnel.Write(msg)
 					return err
@@ -77,10 +80,9 @@ func (p *Processor) Process(ctx context.Context) error {
 				p.tunnel.Write(msg)
 				p.state = SERVER_STATE_HANDSHAKE
 			case PKT_TYPE_TUNNEL_CREATE:
-				log.Printf("Tunnel create")
+				p.logger.Info("Tunnel create")
 				if p.state != SERVER_STATE_HANDSHAKE {
-					log.Printf("Tunnel create attempted while in wrong state %d != %d",
-						p.state, SERVER_STATE_HANDSHAKE)
+					p.logger.Error("Tunnel create attempted while in wrong state", "state", p.state, "expected", SERVER_STATE_HANDSHAKE)
 					msg := p.tunnelResponse(E_PROXY_INTERNALERROR)
 					p.tunnel.Write(msg)
 					return fmt.Errorf("%x: PAA cookie rejected, wrong state", E_PROXY_INTERNALERROR)
@@ -88,7 +90,7 @@ func (p *Processor) Process(ctx context.Context) error {
 				_, cookie := p.tunnelRequest(message.msg)
 				if p.gw.CheckPAACookie != nil {
 					if ok, _ := p.gw.CheckPAACookie(ctx, cookie); !ok {
-						log.Printf("Invalid PAA cookie received from client %s", p.tunnel.User.GetAttribute(identity.AttrClientIp))
+						p.logger.Error("Invalid PAA cookie received from client", "ip", p.tunnel.User.GetAttribute(identity.AttrClientIp))
 						msg := p.tunnelResponse(E_PROXY_COOKIE_AUTHENTICATION_ACCESS_DENIED)
 						p.tunnel.Write(msg)
 						return fmt.Errorf("%x: invalid PAA cookie", E_PROXY_COOKIE_AUTHENTICATION_ACCESS_DENIED)
@@ -98,10 +100,9 @@ func (p *Processor) Process(ctx context.Context) error {
 				p.tunnel.Write(msg)
 				p.state = SERVER_STATE_TUNNEL_CREATE
 			case PKT_TYPE_TUNNEL_AUTH:
-				log.Printf("Tunnel auth")
+				p.logger.Info("Tunnel auth")
 				if p.state != SERVER_STATE_TUNNEL_CREATE {
-					log.Printf("Tunnel auth attempted while in wrong state %d != %d",
-						p.state, SERVER_STATE_TUNNEL_CREATE)
+					p.logger.Error("Tunnel auth attempted while in wrong state", "state", p.state, "expected", SERVER_STATE_TUNNEL_CREATE)
 					msg := p.tunnelAuthResponse(E_PROXY_INTERNALERROR)
 					p.tunnel.Write(msg)
 					return fmt.Errorf("%x: Tunnel auth rejected, wrong state", E_PROXY_INTERNALERROR)
@@ -109,7 +110,7 @@ func (p *Processor) Process(ctx context.Context) error {
 				client := p.tunnelAuthRequest(message.msg)
 				if p.gw.CheckClientName != nil {
 					if ok, _ := p.gw.CheckClientName(ctx, client); !ok {
-						log.Printf("Invalid client name: %s", client)
+						p.logger.Error("Invalid client name", "client", client)
 						msg := p.tunnelAuthResponse(ERROR_ACCESS_DENIED)
 						p.tunnel.Write(msg)
 						return fmt.Errorf("%x: Tunnel auth rejected, invalid client name", ERROR_ACCESS_DENIED)
@@ -119,10 +120,9 @@ func (p *Processor) Process(ctx context.Context) error {
 				p.tunnel.Write(msg)
 				p.state = SERVER_STATE_TUNNEL_AUTHORIZE
 			case PKT_TYPE_CHANNEL_CREATE:
-				log.Printf("Channel create")
+				p.logger.Info("Channel create")
 				if p.state != SERVER_STATE_TUNNEL_AUTHORIZE {
-					log.Printf("Channel create attempted while in wrong state %d != %d",
-						p.state, SERVER_STATE_TUNNEL_AUTHORIZE)
+					p.logger.Error("Channel create attempted while in wrong state", "state", p.state, "expected", SERVER_STATE_TUNNEL_AUTHORIZE)
 					msg := p.channelResponse(E_PROXY_INTERNALERROR)
 					p.tunnel.Write(msg)
 					return fmt.Errorf("%x: Channel create rejected, wrong state", E_PROXY_INTERNALERROR)
@@ -130,24 +130,24 @@ func (p *Processor) Process(ctx context.Context) error {
 				server, port := p.channelRequest(message.msg)
 				host := net.JoinHostPort(server, strconv.Itoa(int(port)))
 				if p.gw.CheckHost != nil {
-					log.Printf("Verifying %s host connection", host)
+					p.logger.Info("Verifying host connection", "host", host)
 					if ok, _ := p.gw.CheckHost(ctx, host); !ok {
-						log.Printf("Not allowed to connect to %s by policy handler", host)
+						p.logger.Error("Not allowed to connect to host by policy handler", "host", host)
 						msg := p.channelResponse(E_PROXY_RAP_ACCESSDENIED)
 						p.tunnel.Write(msg)
 						return fmt.Errorf("%x: denied by security policy", E_PROXY_RAP_ACCESSDENIED)
 					}
 				}
-				log.Printf("Establishing connection to RDP server: %s", host)
+				p.logger.Info("Establishing connection to RDP server", "host", host)
 				p.tunnel.rwc, err = net.DialTimeout("tcp", host, time.Second*15)
 				if err != nil {
-					log.Printf("Error connecting to %s, %s", host, err)
+					p.logger.Error("Error connecting to %s, %s", host, err)
 					msg := p.channelResponse(E_PROXY_INTERNALERROR)
 					p.tunnel.Write(msg)
 					return err
 				}
 				p.tunnel.TargetServer = host
-				log.Printf("Connection established")
+				p.logger.Info("Connection established")
 				msg := p.channelResponse(ERROR_SUCCESS)
 				p.tunnel.Write(msg)
 
@@ -157,7 +157,7 @@ func (p *Processor) Process(ctx context.Context) error {
 				p.state = SERVER_STATE_CHANNEL_CREATE
 			case PKT_TYPE_DATA:
 				if p.state < SERVER_STATE_CHANNEL_CREATE {
-					log.Printf("Data received while in wrong state %d != %d", p.state, SERVER_STATE_CHANNEL_CREATE)
+					p.logger.Error("Data received while in wrong state", "state", p.state, "expected", SERVER_STATE_CHANNEL_CREATE)
 					return errors.New("wrong state")
 				}
 				p.state = SERVER_STATE_OPENED
@@ -165,16 +165,16 @@ func (p *Processor) Process(ctx context.Context) error {
 			case PKT_TYPE_KEEPALIVE:
 				// keepalives can be received while the channel is not open yet
 				if p.state < SERVER_STATE_CHANNEL_CREATE {
-					log.Printf("Keepalive received while in wrong state %d != %d", p.state, SERVER_STATE_CHANNEL_CREATE)
+					p.logger.Error("Keepalive received while in wrong state", "state", p.state, "expected", SERVER_STATE_CHANNEL_CREATE)
 					return errors.New("wrong state")
 				}
 
 				// avoid concurrency issues
 				// p.transportIn.Write(createPacket(PKT_TYPE_KEEPALIVE, []byte{}))
 			case PKT_TYPE_CLOSE_CHANNEL:
-				log.Printf("Close channel")
+				p.logger.Info("Close channel")
 				if p.state != SERVER_STATE_OPENED {
-					log.Printf("Channel closed while in wrong state %d != %d", p.state, SERVER_STATE_OPENED)
+					p.logger.Error("Channel closed while in wrong state", "state", p.state, "expected", SERVER_STATE_OPENED)
 					return errors.New("wrong state")
 				}
 				msg := p.channelCloseResponse(ERROR_SUCCESS)
@@ -182,7 +182,7 @@ func (p *Processor) Process(ctx context.Context) error {
 				p.state = SERVER_STATE_CLOSED
 				return nil
 			default:
-				log.Printf("Unknown packet (size %d): %x", message.length, message.msg)
+				p.logger.Warn("Unknown packet", "size", message.length, "message", message.msg)
 			}
 		}
 	}
@@ -208,7 +208,7 @@ func (p *Processor) handshakeRequest(data []byte) (major byte, minor byte, versi
 	binary.Read(r, binary.LittleEndian, &version)
 	binary.Read(r, binary.LittleEndian, &extAuth)
 
-	log.Printf("major: %d, minor: %d, version: %d, ext auth: %d", major, minor, version, extAuth)
+	p.logger.Info("handshake information", "major", major, "minor", minor, "version", version, "extauth", extAuth)
 	return
 }
 

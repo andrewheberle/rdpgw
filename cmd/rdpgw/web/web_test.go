@@ -48,7 +48,7 @@ func TestGetHost(t *testing.T) {
 		HostSelection: "roundrobin",
 		Hosts:         hosts,
 	}
-	h := c.NewHandler()
+	h, _ := c.NewHandler()
 
 	u := &url.URL{
 		Host: "example.com",
@@ -67,7 +67,7 @@ func TestGetHost(t *testing.T) {
 	c.HostSelection = "unsigned"
 	vals.Set("host", "in.valid.host")
 	u.RawQuery = vals.Encode()
-	h = c.NewHandler()
+	h, _ = c.NewHandler()
 	host, err = h.getHost(ctx, u)
 	if err == nil {
 		t.Fatalf("Accepted host %s is not in hosts list", host)
@@ -75,7 +75,7 @@ func TestGetHost(t *testing.T) {
 
 	vals.Set("host", hosts[0])
 	u.RawQuery = vals.Encode()
-	h = c.NewHandler()
+	h, _ = c.NewHandler()
 	host, err = h.getHost(ctx, u)
 	if err != nil {
 		t.Fatalf("Not accepted host %s is in hosts list (err: %s)", hosts[0], err)
@@ -89,7 +89,7 @@ func TestGetHost(t *testing.T) {
 	test := "bla.bla.com"
 	vals.Set("host", test)
 	u.RawQuery = vals.Encode()
-	h = c.NewHandler()
+	h, _ = c.NewHandler()
 	host, err = h.getHost(ctx, u)
 	if err != nil {
 		t.Fatalf("%s is not accepted", host)
@@ -109,7 +109,7 @@ func TestGetHost(t *testing.T) {
 	}
 	vals.Set("host", queryToken)
 	u.RawQuery = vals.Encode()
-	h = c.NewHandler()
+	h, _ = c.NewHandler()
 	host, err = h.getHost(ctx, u)
 	if err != nil {
 		t.Fatalf("Not accepted host %s is in hosts list (err: %s)", hosts[0], err)
@@ -142,7 +142,7 @@ func TestHandler_HandleDownload(t *testing.T) {
 		GatewayAddress:    u,
 		RdpOpts:           RdpOpts{SplitUserDomain: true},
 	}
-	h := c.NewHandler()
+	h, _ := c.NewHandler()
 
 	hh := http.HandlerFunc(h.HandleDownload)
 	hh.ServeHTTP(rr, req)
@@ -205,7 +205,7 @@ func TestHandler_HandleSignedDownload(t *testing.T) {
 		GatewayAddress:    u,
 		RdpOpts:           RdpOpts{SplitUserDomain: true},
 	}
-	h := c.NewHandler()
+	h, _ := c.NewHandler()
 
 	// set up rdp signer
 	fs := afero.NewMemMapFs()
@@ -299,7 +299,7 @@ func TestHandler_HandleDownloadWithRdpTemplate(t *testing.T) {
 		RdpOpts:           RdpOpts{SplitUserDomain: true},
 		TemplateFile:      f.Name(),
 	}
-	h := c.NewHandler()
+	h, _ := c.NewHandler()
 
 	hh := http.HandlerFunc(h.HandleDownload)
 	hh.ServeHTTP(rr, req)

@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
@@ -31,7 +30,6 @@ func InitStore(sessionKey []byte, encryptionKey []byte, storeType string, maxLen
 	}
 
 	if storeType == "file" {
-		log.Println("Filesystem is used as session storage")
 		fs := sessions.NewFilesystemStore(os.TempDir(), sessionKey, encryptionKey)
 		fs.MaxAge(maxAge)
 
@@ -39,13 +37,11 @@ func InitStore(sessionKey []byte, encryptionKey []byte, storeType string, maxLen
 		if maxLength == 0 {
 			maxLength = maxSessionLength
 		}
-		log.Printf("Setting maximum session storage to %d bytes", maxLength)
 		fs.MaxLength(maxLength)
 
 		return &SessionStore{fs, maxAge}, nil
 	}
 
-	log.Println("Cookies are used as session storage")
 	cs := sessions.NewCookieStore(sessionKey, encryptionKey)
 	cs.MaxAge(maxAge)
 

@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/maphash"
-	"log"
+	"log/slog"
 	rnd "math/rand"
 	"net/http"
 	"net/url"
@@ -20,6 +21,9 @@ import (
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/rdp"
 )
+
+//go:embed favicon.ico
+var icon embed.FS
 
 type TokenGeneratorFunc func(context.Context, string, string) (string, error)
 type UserTokenGeneratorFunc func(context.Context, string) (string, error)
@@ -39,13 +43,16 @@ type Config struct {
 	RdpSigningCert     string
 	RdpSigningKey      string
 	SessionStore       *SessionStore
+	Logger             *slog.Logger
 }
 
 type RdpOpts struct {
-	UsernameTemplate   string
-	SplitUserDomain    bool
-	NoUsername         bool
-	AllowQueryUsername bool
+	UsernameTemplate    string
+	SplitUserDomain     bool
+	NoUsername          bool
+	AllowQueryUsername  bool
+	NetworkAutoDetect   bool
+	BandwidthAutoDetect bool
 }
 
 type Handler struct {
@@ -62,11 +69,12 @@ type Handler struct {
 	rdpSigner          *rdpsign.Signer
 	sessionStore       *SessionStore
 	maxAge             int
+	logger             *slog.Logger
 }
 
-func (c *Config) NewHandler() *Handler {
+func (c *Config) NewHandler() (*Handler, error) {
 	if len(c.Hosts) < 1 && (c.HostSelection != hostselection.Any && c.HostSelection != hostselection.AnySigned) {
-		log.Fatalf("Not enough hosts to connect to specified for %s host selection algorithm", c.HostSelection)
+		return nil, fmt.Errorf("not enough hosts to connect to specified for %s host selection algorithm", c.HostSelection)
 	}
 
 	handler := &Handler{
@@ -83,17 +91,24 @@ func (c *Config) NewHandler() *Handler {
 		sessionStore:       c.SessionStore,
 	}
 
+	// set up logger
+	if c.Logger != nil {
+		handler.logger = c.Logger
+	} else {
+		handler.logger = slog.New(slog.DiscardHandler)
+	}
+
 	// set up RDP signer if config values are set
 	if c.RdpSigningCert != "" && c.RdpSigningKey != "" {
 		signer, err := rdpsign.New(c.RdpSigningCert, c.RdpSigningKey)
 		if err != nil {
-			log.Fatal("Could not set up RDP signer", err)
+			return nil, fmt.Errorf("could not set up RDP signer: %w", err)
 		}
 
 		handler.rdpSigner = signer
 	}
 
-	return handler
+	return handler, nil
 }
 
 func (h *Handler) selectRandomHost() string {
@@ -145,8 +160,7 @@ func (h *Handler) getHost(ctx context.Context, u *url.URL) (string, error) {
 			}
 		}
 		if !found {
-			log.Printf("Invalid host %s specified in token", hosts[0])
-			return "", errors.New("invalid host specified in query token")
+			return "", fmt.Errorf("invalid host specified: %s", hosts[0])
 		}
 		return host, nil
 	case hostselection.Unsigned:
@@ -160,8 +174,7 @@ func (h *Handler) getHost(ctx context.Context, u *url.URL) (string, error) {
 			}
 		}
 		// not found
-		log.Printf("Invalid host %s specified in client request", hosts[0])
-		return "", errors.New("invalid host specified in query parameter")
+		return "", fmt.Errorf("invalid host specified: %s", hosts[0])
 	case hostselection.Any:
 		hosts, ok := u.Query()["host"]
 		if !ok {
@@ -173,6 +186,16 @@ func (h *Handler) getHost(ctx context.Context, u *url.URL) (string, error) {
 	}
 }
 
+func (h *Handler) HandleFavicon(w http.ResponseWriter, r *http.Request) {
+	b, err := icon.ReadFile("favicon.ico")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(b)
+}
+
 func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	id := identity.FromRequestCtx(r)
 	ctx := r.Context()
@@ -180,7 +203,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	opts := h.rdpOpts
 
 	if !id.Authenticated() {
-		log.Printf("unauthenticated user %s", id.UserName())
+		h.logger.Warn("unauthenticated user", "user", id.UserName())
 		http.Error(w, errors.New("cannot find session or user").Error(), http.StatusInternalServerError)
 		return
 	}
@@ -188,7 +211,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	// determine host to connect to
 	host, err := h.getHost(ctx, r.URL)
 	if err != nil {
-		log.Printf("unable to get host from query string due to %s", err)
+		h.logger.Error("unable to get host from query string", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -200,14 +223,14 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	if opts.AllowQueryUsername {
 		u, err := h.getUser(ctx, r.URL)
 		if err != nil {
-			log.Printf("unable to get user from query string due to %s", err)
+			h.logger.Error("unable to get user from query string", "error", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 
 		// if set then use it
 		if u != "" && u != render {
 			render = u
-			log.Printf("original username %s changed to %s based on query string parameter", user, render)
+			h.logger.Info("original username changed based on query string parameter", "original", user, "new", render)
 		}
 	}
 
@@ -225,7 +248,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		render = fmt.Sprint(opts.UsernameTemplate)
 		render = strings.Replace(render, "{{ username }}", user, 1)
 		if opts.UsernameTemplate == render {
-			log.Printf("Invalid username template. %s == %s", opts.UsernameTemplate, user)
+			h.logger.Error("Invalid username template", "template", opts.UsernameTemplate)
 			http.Error(w, errors.New("invalid server configuration").Error(), http.StatusInternalServerError)
 			return
 		}
@@ -233,7 +256,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	token, err := h.paaTokenGenerator(ctx, user, host)
 	if err != nil {
-		log.Printf("Cannot generate PAA token for user %s due to %s", user, err)
+		h.logger.Error("Cannot generate PAA token for user", "error", err, "user", user)
 		http.Error(w, errors.New("unable to generate gateway credentials").Error(), http.StatusInternalServerError)
 		return
 	}
@@ -241,7 +264,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	if h.enableUserToken {
 		userToken, err := h.userTokenGenerator(ctx, user)
 		if err != nil {
-			log.Printf("Cannot generate token for user %s due to %s", user, err)
+			h.logger.Error("Cannot generate user token for user", "error", err, "user", user)
 			http.Error(w, errors.New("unable to generate gateway credentials").Error(), http.StatusInternalServerError)
 			return
 		}
@@ -252,7 +275,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	seed := make([]byte, 16)
 	_, err = rand.Read(seed)
 	if err != nil {
-		log.Printf("Cannot generate random seed due to %s", err)
+		h.logger.Error("Cannot generate random seed", "error", err)
 		http.Error(w, errors.New("unable to generate random sequence").Error(), http.StatusInternalServerError)
 		return
 	}
@@ -267,7 +290,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		d, err = rdp.NewBuilderFromFile(h.rdpDefaults)
 		if err != nil {
-			log.Printf("Cannot load RDP template file %s due to %s", h.rdpDefaults, err)
+			h.logger.Error("Cannot load RDP template file", "file", h.rdpDefaults, "error", err)
 			http.Error(w, errors.New("unable to load RDP template").Error(), http.StatusInternalServerError)
 			return
 		}
@@ -285,6 +308,8 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	d.Settings.GatewayAccessToken = token
 	d.Settings.GatewayCredentialMethod = 1
 	d.Settings.GatewayUsageMethod = 1
+	d.Settings.BandwidthAutodetect = h.rdpOpts.BandwidthAutoDetect
+	d.Settings.NetworkAutodetect = h.rdpOpts.NetworkAutoDetect
 
 	// no rdp siging so return as-is
 	if h.rdpSigner == nil {
@@ -298,7 +323,7 @@ func (h *Handler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	// sign rdp content
 	signedContent, err := h.rdpSigner.Sign(rdpContent)
 	if err != nil {
-		log.Printf("Could not sign RDP file due to %s", err)
+		h.logger.Error("Could not sign RDP file", "error", err)
 		http.Error(w, errors.New("could not sign RDP file").Error(), http.StatusInternalServerError)
 		return
 	}

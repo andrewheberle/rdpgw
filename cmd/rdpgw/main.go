@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,13 +37,13 @@ var opts struct {
 	ConfigFile string `short:"c" long:"conf" default:"rdpgw.yaml" description:"config file (yaml)"`
 }
 
-var conf config.Configuration
+var conf *config.Configuration
 
-func initOIDC(callbackUrl *url.URL, store *web.SessionStore) *web.OIDC {
+func initOIDC(callbackUrl *url.URL, store *web.SessionStore) (*web.OIDC, error) {
 	// set oidc config
 	provider, err := oidc.NewProvider(context.Background(), conf.OpenId.ProviderUrl)
 	if err != nil {
-		log.Fatalf("Cannot get oidc provider: %s", err)
+		return nil, fmt.Errorf("Cannot get oidc provider: %w", err)
 	}
 	oidcConfig := &oidc.Config{
 		ClientID: conf.OpenId.ClientId,
@@ -64,21 +66,34 @@ func initOIDC(callbackUrl *url.URL, store *web.SessionStore) *web.OIDC {
 		SessionStore:      store,
 	}
 
-	return o.New()
+	return o.New(), nil
 }
 
 func main() {
+	// set up logger
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
 	// load config
 	_, err := flags.Parse(&opts)
 	if err != nil {
-		panic(err)
+		logger.Error("Could not parse command line", "error", err)
+		os.Exit(1)
 	}
-	conf = config.Load(opts.ConfigFile)
+	conf, err = config.Load(opts.ConfigFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Warn("Configuration file not found, using defaults and environment", "config", opts.ConfigFile)
+		} else {
+			logger.Error("Could not load configuration: %s", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	// set callback url and external advertised gateway address
 	url, err := url.Parse(conf.Server.GatewayAddress)
 	if err != nil {
-		log.Printf("Cannot parse server gateway address %s due to %s", url, err)
+		logger.Error("Cannot parse server gateway address", "url", conf.Server.GatewayAddress, "error", err)
+		os.Exit(1)
 	}
 	if url.Scheme == "" {
 		url.Scheme = "https"
@@ -96,14 +111,16 @@ func main() {
 	security.Hosts = conf.Server.Hosts
 
 	// init session store
+	logger.Info("Setting up session store", "storage", conf.Server.SessionStore)
 	sessionStore, err := web.InitStore([]byte(conf.Server.SessionKey),
 		[]byte(conf.Server.SessionEncryptionKey),
 		conf.Server.SessionStore,
 		conf.Server.MaxSessionLength,
-		conf.Server.MaxSessionAge,
+		int(conf.Server.MaxSessionAge.Seconds()),
 	)
 	if err != nil {
-		log.Fatalf("Could not set up session store due to %s", err)
+		logger.Error("Could not set up session store", "error", err)
+		os.Exit(1)
 	}
 
 	// configure web backend
@@ -114,16 +131,19 @@ func main() {
 		Hosts:            conf.Server.Hosts,
 		HostSelection:    conf.Server.HostSelection,
 		RdpOpts: web.RdpOpts{
-			UsernameTemplate:   conf.Client.UsernameTemplate,
-			SplitUserDomain:    conf.Client.SplitUserDomain,
-			NoUsername:         conf.Client.NoUsername,
-			AllowQueryUsername: conf.Client.AllowQueryUsername,
+			UsernameTemplate:    conf.Client.UsernameTemplate,
+			SplitUserDomain:     conf.Client.SplitUserDomain,
+			NoUsername:          conf.Client.NoUsername,
+			AllowQueryUsername:  conf.Client.AllowQueryUsername,
+			BandwidthAutoDetect: conf.Client.BandwidthAutoDetect,
+			NetworkAutoDetect:   conf.Client.NetworkAutoDetect,
 		},
 		GatewayAddress: url,
 		TemplateFile:   conf.Client.Defaults,
 		RdpSigningCert: conf.Client.SigningCert,
 		RdpSigningKey:  conf.Client.SigningKey,
 		SessionStore:   sessionStore,
+		Logger:         logger.With("service", "web"),
 	}
 
 	if conf.Caps.TokenAuth {
@@ -132,14 +152,18 @@ func main() {
 	if conf.Security.EnableUserToken {
 		w.UserTokenGenerator = security.GenerateUserToken
 	}
-	h := w.NewHandler()
+	h, err := w.NewHandler()
+	if err != nil {
+		logger.Error("Could not set up web handler", "error", err)
+		os.Exit(1)
+	}
 
-	log.Printf("Starting remote desktop gateway server")
+	logger.Info("Starting remote desktop gateway server")
 	cfg := &tls.Config{}
 
 	// configure tls security
 	if conf.Server.Tls == config.TlsDisable {
-		log.Printf("TLS disabled - rdp gw connections require tls, make sure to have a terminator")
+		logger.Warn("TLS disabled - rdp gw connections require tls, make sure to have a terminator")
 	} else {
 		// auto config
 		tlsConfigured := false
@@ -148,23 +172,24 @@ func main() {
 		if tlsDebug != "" {
 			w, err := os.OpenFile(tlsDebug, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 			if err != nil {
-				log.Fatalf("Cannot open key log file %s for writing %s", tlsDebug, err)
+				logger.Error("Cannot open key log file", "log", tlsDebug, "error", err)
+				os.Exit(1)
 			}
-			log.Printf("Key log file set to: %s", tlsDebug)
+			logger.Info("Using key log file", "log", tlsDebug)
 			cfg.KeyLogWriter = w
 		}
 
 		if conf.Server.KeyFile != "" && conf.Server.CertFile != "" {
 			cert, err := tls.LoadX509KeyPair(conf.Server.CertFile, conf.Server.KeyFile)
 			if err != nil {
-				log.Printf("Cannot load certfile or keyfile (%s) falling back to acme", err)
+				logger.Warn("Cannot load certfile or keyfile falling back to acme", "error", err, "cert", conf.Server.CertFile, "key", conf.Server.KeyFile)
 			}
 			cfg.Certificates = append(cfg.Certificates, cert)
 			tlsConfigured = true
 		}
 
 		if !tlsConfigured {
-			log.Printf("Using acme / letsencrypt for tls configuration. Enabling http (port 80) for verification")
+			logger.Info("Using acme / letsencrypt for tls configuration. Enabling http (port 80) for verification")
 			// setup a simple handler which sends a HTHS header for six months (!)
 			http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Strict-Transport-Security", "max-age=15768000 ; includeSubDomains")
@@ -185,22 +210,21 @@ func main() {
 	}
 
 	// gateway confg
-	gw := protocol.Gateway{
-		RedirectFlags: protocol.RedirectFlags{
-			Clipboard:  conf.Caps.EnableClipboard,
-			Drive:      conf.Caps.EnableDrive,
-			Printer:    conf.Caps.EnablePrinter,
-			Port:       conf.Caps.EnablePort,
-			Pnp:        conf.Caps.EnablePnp,
-			DisableAll: conf.Caps.DisableRedirect,
-			EnableAll:  conf.Caps.RedirectAll,
-		},
-		IdleTimeout:   conf.Caps.IdleTimeout,
-		SmartCardAuth: conf.Caps.SmartCardAuth,
-		TokenAuth:     conf.Caps.TokenAuth,
-		ReceiveBuf:    conf.Server.ReceiveBuf,
-		SendBuf:       conf.Server.SendBuf,
+	gw, err := protocol.NewGateway(logger.With("service", "gateway"))
+	gw.RedirectFlags = protocol.RedirectFlags{
+		Clipboard:  conf.Caps.EnableClipboard,
+		Drive:      conf.Caps.EnableDrive,
+		Printer:    conf.Caps.EnablePrinter,
+		Port:       conf.Caps.EnablePort,
+		Pnp:        conf.Caps.EnablePnp,
+		DisableAll: conf.Caps.DisableRedirect,
+		EnableAll:  conf.Caps.RedirectAll,
 	}
+	gw.IdleTimeout = conf.Caps.IdleTimeout
+	gw.SmartCardAuth = conf.Caps.SmartCardAuth
+	gw.TokenAuth = conf.Caps.TokenAuth
+	gw.ReceiveBuf = conf.Server.ReceiveBuf
+	gw.SendBuf = conf.Server.SendBuf
 
 	if conf.Caps.TokenAuth {
 		gw.CheckPAACookie = security.CheckPAACookie
@@ -210,6 +234,9 @@ func main() {
 	}
 
 	r := mux.NewRouter()
+
+	// add favicon handler
+	r.HandleFunc("/favicon.ico", h.HandleFavicon)
 
 	// ensure identity is set in context and get some extra info
 	r.Use(h.EnrichContext)
@@ -225,8 +252,11 @@ func main() {
 
 	// openid
 	if conf.Server.OpenIDEnabled() {
-		log.Printf("enabling openid extended authentication")
-		o := initOIDC(url, sessionStore)
+		logger.Info("enabling openid extended authentication")
+		o, err := initOIDC(url, sessionStore)
+		if err != nil {
+			logger.Error("could not set up oidc", "error", err)
+		}
 		r.Handle("/connect", o.Authenticated(http.HandlerFunc(h.HandleDownload)))
 		r.HandleFunc("/callback", o.HandleCallback)
 
@@ -242,7 +272,7 @@ func main() {
 
 	// ntlm
 	if conf.Server.NtlmEnabled() {
-		log.Printf("enabling NTLM authentication")
+		logger.Info("enabling NTLM authentication")
 		ntlm := web.NTLMAuthHandler{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
 		rdp.NewRoute().HeadersRegexp("Authorization", "NTLM").HandlerFunc(ntlm.NTLMAuth(gw.HandleGatewayProtocol))
 		rdp.NewRoute().HeadersRegexp("Authorization", "Negotiate").HandlerFunc(ntlm.NTLMAuth(gw.HandleGatewayProtocol))
@@ -252,7 +282,7 @@ func main() {
 
 	// basic auth
 	if conf.Server.BasicAuthEnabled() {
-		log.Printf("enabling basic authentication")
+		logger.Info("enabling basic authentication")
 		q := web.BasicAuthHandler{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
 		rdp.NewRoute().HeadersRegexp("Authorization", "Basic").HandlerFunc(q.BasicAuth(gw.HandleGatewayProtocol))
 		auth.Register(`Basic realm="restricted", charset="UTF-8"`)
@@ -260,10 +290,11 @@ func main() {
 
 	// spnego / kerberos
 	if conf.Server.KerberosEnabled() {
-		log.Printf("enabling kerberos authentication")
+		logger.Info("enabling kerberos authentication")
 		keytab, err := keytab.Load(conf.Kerberos.Keytab)
 		if err != nil {
-			log.Fatalf("Cannot load keytab: %s", err)
+			logger.Error("Cannot load keytab", "error", err)
+			os.Exit(1)
 		}
 		rdp.NewRoute().HeadersRegexp("Authorization", "Negotiate").Handler(
 			spnego.SPNEGOKRB5Authenticate(web.TransposeSPNEGOContext(http.HandlerFunc(gw.HandleGatewayProtocol)),
@@ -290,6 +321,7 @@ func main() {
 		err = server.ListenAndServeTLS("", "")
 	}
 	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		logger.Error("ListenAndServe", "error", err)
+		os.Exit(1)
 	}
 }

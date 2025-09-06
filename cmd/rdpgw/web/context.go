@@ -1,7 +1,6 @@
 package web
 
 import (
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -26,8 +25,11 @@ func (h *Handler) EnrichContext(next http.Handler) http.Handler {
 			}
 		}
 
-		log.Printf("Identity SessionId: %s, UserName: %s: Authenticated: %t",
-			id.SessionId(), id.UserName(), id.Authenticated())
+		if id.Authenticated() {
+			h.logger.Info("Connection information", "session_id", id.SessionId(), "user", id.UserName(), "authenticated", id.Authenticated())
+		} else {
+			h.logger.Info("Connection information", "session_id", id.SessionId(), "authenticated", id.Authenticated())
+		}
 
 		h := r.Header.Get("X-Forwarded-For")
 		if h != "" {

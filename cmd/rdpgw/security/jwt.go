@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"time"
+
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/protocol"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"golang.org/x/oauth2"
-	"log"
-	"time"
 )
 
 var (
@@ -64,14 +65,14 @@ func CheckPAACookie(ctx context.Context, tokenString string) (bool, error) {
 
 	token, err := jwt.ParseSigned(tokenString, []jose.SignatureAlgorithm{jose.HS256})
 	if err != nil {
-		log.Printf("cannot parse token due to: %t", err)
+		log.Printf("cannot parse token due to: %s", err)
 		return false, err
 	}
 
 	// check if the signing algo matches what we expect
 	for _, header := range token.Headers {
 		if header.Algorithm != string(jose.HS256) {
-			return false, fmt.Errorf("unexpected signing method: %v", header.Algorithm)
+			return false, fmt.Errorf("unexpected signing method: %s", header.Algorithm)
 		}
 	}
 
@@ -81,7 +82,7 @@ func CheckPAACookie(ctx context.Context, tokenString string) (bool, error) {
 	// Claims automagically checks the signature...
 	err = token.Claims(SigningKey, &standard, &custom)
 	if err != nil {
-		log.Printf("token signature validation failed due to %tunnel", err)
+		log.Printf("token signature validation failed due to %s:", err)
 		return false, err
 	}
 
@@ -92,7 +93,7 @@ func CheckPAACookie(ctx context.Context, tokenString string) (bool, error) {
 	})
 
 	if err != nil {
-		log.Printf("token validation failed due to %tunnel", err)
+		log.Printf("token validation failed due to %s:", err)
 		return false, err
 	}
 
@@ -100,7 +101,7 @@ func CheckPAACookie(ctx context.Context, tokenString string) (bool, error) {
 	tokenSource := Oauth2Config.TokenSource(ctx, &oauth2.Token{AccessToken: custom.AccessToken})
 	user, err := OIDCProvider.UserInfo(ctx, tokenSource)
 	if err != nil {
-		log.Printf("Cannot get user info for access token: %tunnel", err)
+		log.Printf("Cannot get user info for access token: %s:", err)
 		return false, err
 	}
 

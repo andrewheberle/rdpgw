@@ -56,7 +56,13 @@ type message struct {
 
 // Write puts the packet on the transport and updates the statistics for bytes sent
 func (t *Tunnel) Write(pkt []byte) {
+	start := time.Now()
+	tunnelPacketsSent.Inc()
+	defer func() {
+		tunnelSendLatency.Observe(float64(time.Since(start).Seconds()))
+	}()
 	n, _ := t.transportOut.WritePacket(pkt)
+	tunnelBytesSent.Add(float64(n))
 	t.BytesSent += int64(n)
 }
 
@@ -64,12 +70,18 @@ func (t *Tunnel) Write(pkt []byte) {
 // packet, with the header removed, and the packet size. It updates the
 // statistics for bytes received
 func (t *Tunnel) Read() ([]*message, error) {
+	start := time.Now()
+	tunnelPacketsReceived.Inc()
+	defer func() {
+		tunnelReceiveLatency.Observe(float64(time.Since(start).Seconds()))
+	}()
 	messages, err := readMessage(t.transportIn)
 	if err != nil {
 		return nil, err
 	}
 	for _, message := range messages {
 		t.BytesReceived += int64(message.length)
+		tunnelBytesReceived.Add(float64(message.length))
 		t.LastSeen = time.Now()
 	}
 	return messages, err

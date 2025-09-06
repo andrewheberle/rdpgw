@@ -2,7 +2,7 @@ package protocol
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"testing"
 )
 
@@ -43,7 +43,8 @@ func TestHandshake(t *testing.T) {
 	gw := &Gateway{}
 	tunnel := &Tunnel{}
 
-	h := NewProcessor(gw, tunnel)
+	logger := slog.New(slog.DiscardHandler)
+	h := NewProcessor(gw, tunnel, logger)
 
 	data := client.handshakeRequest()
 
@@ -53,7 +54,7 @@ func TestHandshake(t *testing.T) {
 		t.Fatalf("verifyHeader failed: %s", err)
 	}
 
-	log.Printf("pkt: %x", pkt)
+	t.Logf("pkt: %x", pkt)
 
 	major, minor, version, extAuth := h.handshakeRequest(pkt)
 	if major != MajorVersion || minor != MinorVersion || version != Version {
@@ -70,7 +71,7 @@ func TestHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifyHeader failed: %s", err)
 	}
-	log.Printf("pkt: %x", pkt)
+	t.Logf("pkt: %x", pkt)
 
 	caps, err := client.handshakeResponse(pkt)
 	if !((caps & HTTP_EXTENDED_AUTH_PAA) == HTTP_EXTENDED_AUTH_PAA) {
@@ -93,7 +94,8 @@ func TestMatchAuth(t *testing.T) {
 	gw := &Gateway{}
 	tunnel := &Tunnel{}
 
-	h := NewProcessor(gw, tunnel)
+	logger := slog.New(slog.DiscardHandler)
+	h := NewProcessor(gw, tunnel, logger)
 
 	in := uint16(0)
 	caps, err := h.matchAuth(in)
@@ -134,7 +136,8 @@ func TestTunnelCreation(t *testing.T) {
 	gw := &Gateway{TokenAuth: true}
 	tunnel := &Tunnel{}
 
-	h := NewProcessor(gw, tunnel)
+	logger := slog.New(slog.DiscardHandler)
+	h := NewProcessor(gw, tunnel, logger)
 
 	data := client.tunnelRequest()
 	_, _, pkt, err := verifyPacketHeader(data, PKT_TYPE_TUNNEL_CREATE,
@@ -180,7 +183,8 @@ func TestTunnelAuth(t *testing.T) {
 		RedirectFlags: RedirectFlags{Clipboard: true},
 	}
 	tunnel := &Tunnel{}
-	h := NewProcessor(gw, tunnel)
+	logger := slog.New(slog.DiscardHandler)
+	h := NewProcessor(gw, tunnel, logger)
 
 	data := client.tunnelAuthRequest()
 	_, _, pkt, err := verifyPacketHeader(data, PKT_TYPE_TUNNEL_AUTH, uint32(TunnelAuthLen+len(name)*2))
@@ -226,7 +230,8 @@ func TestChannelCreation(t *testing.T) {
 		},
 	}
 	tunnel := &Tunnel{}
-	h := NewProcessor(gw, tunnel)
+	logger := slog.New(slog.DiscardHandler)
+	h := NewProcessor(gw, tunnel, logger)
 
 	data := client.channelRequest()
 	_, _, pkt, err := verifyPacketHeader(data, PKT_TYPE_CHANNEL_CREATE, uint32(ChannelCreateLen+len(server)*2))

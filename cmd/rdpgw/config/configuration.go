@@ -1,10 +1,15 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
+	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/hostselection"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/security"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -35,23 +40,23 @@ type Configuration struct {
 }
 
 type ServerConfig struct {
-	GatewayAddress       string   `koanf:"gatewayaddress"`
-	Port                 int      `koanf:"port"`
-	CertFile             string   `koanf:"certfile"`
-	KeyFile              string   `koanf:"keyfile"`
-	Hosts                []string `koanf:"hosts"`
-	HostSelection        string   `koanf:"hostselection"`
-	SessionKey           string   `koanf:"sessionkey"`
-	SessionEncryptionKey string   `koanf:"sessionencryptionkey"`
-	SessionStore         string   `koanf:"sessionstore"`
-	MaxSessionAge        int      `koanf:"maxsessionage"`
-	MaxSessionLength     int      `koanf:"maxsessionlength"`
-	SendBuf              int      `koanf:"sendbuf"`
-	ReceiveBuf           int      `koanf:"receivebuf"`
-	Tls                  string   `koanf:"tls"`
-	Authentication       []string `koanf:"authentication"`
-	AuthSocket           string   `koanf:"authsocket"`
-	BasicAuthTimeout     int      `koanf:"basicauthtimeout"`
+	GatewayAddress       string        `koanf:"gatewayaddress"`
+	Port                 int           `koanf:"port"`
+	CertFile             string        `koanf:"certfile"`
+	KeyFile              string        `koanf:"keyfile"`
+	Hosts                []string      `koanf:"hosts"`
+	HostSelection        string        `koanf:"hostselection"`
+	SessionKey           string        `koanf:"sessionkey"`
+	SessionEncryptionKey string        `koanf:"sessionencryptionkey"`
+	SessionStore         string        `koanf:"sessionstore"`
+	MaxSessionAge        time.Duration `koanf:"maxsessionage"`
+	MaxSessionLength     int           `koanf:"maxsessionlength"`
+	SendBuf              int           `koanf:"sendbuf"`
+	ReceiveBuf           int           `koanf:"receivebuf"`
+	Tls                  string        `koanf:"tls"`
+	Authentication       []string      `koanf:"authentication"`
+	AuthSocket           string        `koanf:"authsocket"`
+	BasicAuthTimeout     int           `koanf:"basicauthtimeout"`
 }
 
 type KerberosConfig struct {
@@ -92,12 +97,14 @@ type SecurityConfig struct {
 type ClientConfig struct {
 	Defaults string `koanf:"defaults"`
 	// kept for backwards compatibility
-	UsernameTemplate   string `koanf:"usernametemplate"`
-	SplitUserDomain    bool   `koanf:"splituserdomain"`
-	NoUsername         bool   `koanf:"nousername"`
-	SigningCert        string `koanf:"signingcert"`
-	SigningKey         string `koanf:"signingkey"`
-	AllowQueryUsername bool   `koanf:"allowqueryusername"`
+	UsernameTemplate    string `koanf:"usernametemplate"`
+	SplitUserDomain     bool   `koanf:"splituserdomain"`
+	NoUsername          bool   `koanf:"nousername"`
+	SigningCert         string `koanf:"signingcert"`
+	SigningKey          string `koanf:"signingkey"`
+	AllowQueryUsername  bool   `koanf:"allowqueryusername"`
+	NetworkAutoDetect   bool   `koanf:"networkautodetect"`
+	BandwidthAutoDetect bool   `koanf:"bandwidthautodetect"`
 }
 
 func ToCamel(s string) string {
@@ -135,31 +142,35 @@ func ToCamel(s string) string {
 	return n.String()
 }
 
-var Conf Configuration
-
-func Load(configFile string) Configuration {
+func Load(configFile string) (*Configuration, error) {
+	var configMissing bool
+	var conf Configuration
 
 	var k = koanf.New(".")
 
-	k.Load(confmap.Provider(map[string]interface{}{
+	if err := k.Load(confmap.Provider(map[string]interface{}{
 		"Server.Tls":                 "auto",
 		"Server.Port":                443,
 		"Server.SessionStore":        "cookie",
-		"Server.HostSelection":       "roundrobin",
+		"Server.HostSelection":       hostselection.RoundRobin,
 		"Server.Authentication":      "openid",
 		"Server.AuthSocket":          "/tmp/rdpgw-auth.sock",
 		"Server.BasicAuthTimeout":    5,
+		"Server.MaxSessionAge":       time.Minute * 5,
 		"Client.NetworkAutoDetect":   1,
 		"Client.BandwidthAutoDetect": 1,
 		"Security.VerifyClientIp":    true,
 		"Caps.TokenAuth":             true,
-	}, "."), nil)
+	}, "."), nil); err != nil {
+		return nil, err
+	}
 
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		log.Printf("Config file %s not found, using defaults and environment", configFile)
+	if _, err := os.Stat(configFile); errors.Is(err, os.ErrNotExist) {
+		// non fatal error
+		configMissing = true
 	} else {
 		if err := k.Load(file.Provider(configFile), yaml.Parser()); err != nil {
-			log.Fatalf("Error loading config from file: %v", err)
+			return nil, fmt.Errorf("error loading config from file: %w", err)
 		}
 	}
 
@@ -176,70 +187,82 @@ func Load(configFile string) Configuration {
 		return key, v
 
 	}), nil); err != nil {
-		log.Fatalf("Error loading config from environment: %v", err)
+		return nil, fmt.Errorf("error loading config from environment: %w", err)
 	}
 
 	koanfTag := koanf.UnmarshalConf{Tag: "koanf"}
-	k.UnmarshalWithConf("Server", &Conf.Server, koanfTag)
-	k.UnmarshalWithConf("OpenId", &Conf.OpenId, koanfTag)
-	k.UnmarshalWithConf("Caps", &Conf.Caps, koanfTag)
-	k.UnmarshalWithConf("Security", &Conf.Security, koanfTag)
-	k.UnmarshalWithConf("Client", &Conf.Client, koanfTag)
-	k.UnmarshalWithConf("Kerberos", &Conf.Kerberos, koanfTag)
+	k.UnmarshalWithConf("Server", &conf.Server, koanfTag)
+	k.UnmarshalWithConf("OpenId", &conf.OpenId, koanfTag)
+	k.UnmarshalWithConf("Caps", &conf.Caps, koanfTag)
+	k.UnmarshalWithConf("Security", &conf.Security, koanfTag)
+	k.UnmarshalWithConf("Client", &conf.Client, koanfTag)
+	k.UnmarshalWithConf("Kerberos", &conf.Kerberos, koanfTag)
 
-	if len(Conf.Security.PAATokenEncryptionKey) != 32 {
-		Conf.Security.PAATokenEncryptionKey, _ = security.GenerateRandomString(32)
+	// check hosts are provided for roundrobin, signed and unsigned
+	if slices.Contains([]string{hostselection.RoundRobin, hostselection.Signed, hostselection.Unsigned}, conf.Server.HostSelection) && len(conf.Server.Hosts) == 0 {
+		return nil, fmt.Errorf("not enough hosts for host selection algorithm %s", conf.Server.HostSelection)
+	}
+
+	log.Printf("hostselection = %s; hosts = %d", conf.Server.HostSelection, len(conf.Server.Hosts))
+
+	if len(conf.Security.PAATokenEncryptionKey) != 32 {
+		conf.Security.PAATokenEncryptionKey, _ = security.GenerateRandomString(32)
 		log.Printf("No valid `security.paatokenencryptionkey` specified (empty or not 32 characters). Setting to random")
 	}
 
-	if len(Conf.Security.PAATokenSigningKey) != 32 {
-		Conf.Security.PAATokenSigningKey, _ = security.GenerateRandomString(32)
+	if len(conf.Security.PAATokenSigningKey) != 32 {
+		conf.Security.PAATokenSigningKey, _ = security.GenerateRandomString(32)
 		log.Printf("No valid `security.paatokensigningkey` specified (empty or not 32 characters). Setting to random")
 	}
 
-	if Conf.Security.EnableUserToken {
-		if len(Conf.Security.UserTokenEncryptionKey) != 32 {
-			Conf.Security.UserTokenEncryptionKey, _ = security.GenerateRandomString(32)
+	if conf.Security.EnableUserToken {
+		if len(conf.Security.UserTokenEncryptionKey) != 32 {
+			conf.Security.UserTokenEncryptionKey, _ = security.GenerateRandomString(32)
 			log.Printf("No valid `security.usertokenencryptionkey` specified (empty or not 32 characters). Setting to random")
 		}
 	}
 
-	if len(Conf.Server.SessionKey) != 32 {
-		Conf.Server.SessionKey, _ = security.GenerateRandomString(32)
+	if len(conf.Server.SessionKey) != 32 {
+		conf.Server.SessionKey, _ = security.GenerateRandomString(32)
 		log.Printf("No valid `server.sessionkey` specified (empty or not 32 characters). Setting to random")
 	}
 
-	if len(Conf.Server.SessionEncryptionKey) != 32 {
-		Conf.Server.SessionEncryptionKey, _ = security.GenerateRandomString(32)
+	if len(conf.Server.SessionEncryptionKey) != 32 {
+		conf.Server.SessionEncryptionKey, _ = security.GenerateRandomString(32)
 		log.Printf("No valid `server.sessionencryptionkey` specified (empty or not 32 characters). Setting to random")
 	}
 
-	if Conf.Server.HostSelection == "signed" && len(Conf.Security.QueryTokenSigningKey) == 0 {
-		log.Fatalf("host selection is set to `signed` but `querytokensigningkey` is not set")
+	if conf.Server.HostSelection == "signed" && len(conf.Security.QueryTokenSigningKey) == 0 {
+		return nil, fmt.Errorf("host selection is set to `signed` but `querytokensigningkey` is not set")
 	}
 
-	if Conf.Server.BasicAuthEnabled() && Conf.Server.Tls == "disable" {
-		log.Fatalf("basicauth=local and tls=disable are mutually exclusive")
+	if conf.Server.BasicAuthEnabled() && conf.Server.Tls == "disable" {
+		return nil, fmt.Errorf("basicauth=local and tls=disable are mutually exclusive")
 	}
 
-	if Conf.Server.NtlmEnabled() && Conf.Server.KerberosEnabled() {
-		log.Fatalf("ntlm and kerberos authentication are not stackable")
+	if conf.Server.NtlmEnabled() && conf.Server.KerberosEnabled() {
+		return nil, fmt.Errorf("ntlm and kerberos authentication are not stackable")
 	}
 
-	if !Conf.Caps.TokenAuth && Conf.Server.OpenIDEnabled() {
-		log.Fatalf("openid is configured but tokenauth disabled")
+	if !conf.Caps.TokenAuth && conf.Server.OpenIDEnabled() {
+		return nil, fmt.Errorf("openid is configured but tokenauth disabled")
 	}
 
-	if Conf.Server.KerberosEnabled() && Conf.Kerberos.Keytab == "" {
-		log.Fatalf("kerberos is configured but no keytab was specified")
+	if conf.Server.KerberosEnabled() && conf.Kerberos.Keytab == "" {
+		return nil, fmt.Errorf("kerberos is configured but no keytab was specified")
 	}
 
 	// prepend '//' if required for URL parsing
-	if !strings.Contains(Conf.Server.GatewayAddress, "//") {
-		Conf.Server.GatewayAddress = "//" + Conf.Server.GatewayAddress
+	if !strings.Contains(conf.Server.GatewayAddress, "//") {
+		conf.Server.GatewayAddress = "//" + conf.Server.GatewayAddress
 	}
 
-	return Conf
+	// return not exist error back to be handled by caller
+	if configMissing {
+		return &conf, os.ErrNotExist
+	}
+
+	return &conf, nil
 }
 
 func (s *ServerConfig) OpenIDEnabled() bool {
@@ -259,10 +282,5 @@ func (s *ServerConfig) NtlmEnabled() bool {
 }
 
 func (s *ServerConfig) matchAuth(needle string) bool {
-	for _, q := range s.Authentication {
-		if q == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.Authentication, needle)
 }

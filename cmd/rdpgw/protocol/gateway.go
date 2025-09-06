@@ -3,7 +3,7 @@ package protocol
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"reflect"
@@ -51,10 +51,20 @@ type Gateway struct {
 
 	ReceiveBuf int
 	SendBuf    int
+
+	logger *slog.Logger
 }
 
 var upgrader = websocket.Upgrader{}
 var c = cache.New(5*time.Minute, 10*time.Minute)
+
+func NewGateway(logger *slog.Logger) (*Gateway, error) {
+	if logger == nil {
+		return &Gateway{logger: slog.New(slog.DiscardHandler)}, nil
+	}
+
+	return &Gateway{logger: logger}, nil
+}
 
 func (g *Gateway) HandleGatewayProtocol(w http.ResponseWriter, r *http.Request) {
 	connectionCache.Set(float64(c.ItemCount()))
@@ -75,29 +85,33 @@ func (g *Gateway) HandleGatewayProtocol(w http.ResponseWriter, r *http.Request) 
 	} else {
 		t = x.(*Tunnel)
 	}
+
 	ctx = context.WithValue(ctx, CtxTunnel, t)
+
+	// add session_id to logger for use downstream
+	logger := g.logger.With("session_id", id.SessionId())
 
 	if r.Method == MethodRDGOUT {
 		if r.Header.Get("Connection") != "upgrade" && r.Header.Get("Upgrade") != "websocket" {
-			g.handleLegacyProtocol(w, r.WithContext(ctx), t)
+			g.handleLegacyProtocol(w, r.WithContext(ctx), t, logger)
 			return
 		}
 		r.Method = "GET" // force
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Printf("Cannot upgrade falling back to old protocol: %t", err)
+			logger.Error("Cannot upgrade falling back to old protocol", "error", err)
 			return
 		}
 		defer conn.Close()
 
 		err = g.setSendReceiveBuffers(conn.UnderlyingConn())
 		if err != nil {
-			log.Printf("Cannot set send/receive buffers: %t", err)
+			logger.Error("Cannot set send/receive buffers", "error", err)
 		}
 
-		g.handleWebsocketProtocol(ctx, conn, t)
+		g.handleWebsocketProtocol(ctx, conn, t, logger)
 	} else if r.Method == MethodRDGIN {
-		g.handleLegacyProtocol(w, r.WithContext(ctx), t)
+		g.handleLegacyProtocol(w, r.WithContext(ctx), t, logger)
 	}
 }
 
@@ -160,9 +174,10 @@ func (g *Gateway) setSendReceiveBuffers(conn net.Conn) error {
 	return nil
 }
 
-func (g *Gateway) handleWebsocketProtocol(ctx context.Context, c *websocket.Conn, t *Tunnel) {
+func (g *Gateway) handleWebsocketProtocol(ctx context.Context, c *websocket.Conn, t *Tunnel, logger *slog.Logger) {
 	websocketConnections.Inc()
 	defer websocketConnections.Dec()
+	websocketConnectionsTotal.Inc()
 
 	inout, _ := transport.NewWS(c)
 	defer inout.Close()
@@ -172,7 +187,7 @@ func (g *Gateway) handleWebsocketProtocol(ctx context.Context, c *websocket.Conn
 	t.transportIn = inout
 	t.ConnectedOn = time.Now()
 
-	handler := NewProcessor(g, t)
+	handler := NewProcessor(g, t, logger.With("id", t.Id, "connection-id", t.RDGId, "protocol", "websocket"))
 	RegisterTunnel(t, handler)
 	defer RemoveTunnel(t)
 	handler.Process(ctx)
@@ -181,17 +196,15 @@ func (g *Gateway) handleWebsocketProtocol(ctx context.Context, c *websocket.Conn
 // The legacy protocol (no websockets) uses an RDG_IN_DATA for client -> server
 // and RDG_OUT_DATA for server -> client data. The handshakeRequest procedure is a bit different
 // to ensure the connections do not get cached or terminated by a proxy prematurely.
-func (g *Gateway) handleLegacyProtocol(w http.ResponseWriter, r *http.Request, t *Tunnel) {
-	log.Printf("Session %s, %t, %t", t.RDGId, t.transportOut != nil, t.transportIn != nil)
-
+func (g *Gateway) handleLegacyProtocol(w http.ResponseWriter, r *http.Request, t *Tunnel, logger *slog.Logger) {
 	id := identity.FromRequestCtx(r)
 	if r.Method == MethodRDGOUT {
 		out, err := transport.NewLegacy(w)
 		if err != nil {
-			log.Printf("cannot hijack connection to support RDG OUT data channel: %s", err)
+			logger.Error("Cannot hijack connection to support RDG OUT data channel", "error", err)
 			return
 		}
-		log.Printf("Opening RDGOUT for client %s", id.GetAttribute(identity.AttrClientIp))
+		logger.Info("Opening RDGOUT for client", "ip", id.GetAttribute(identity.AttrClientIp))
 
 		t.transportOut = out
 		out.SendAccept(true)
@@ -200,10 +213,11 @@ func (g *Gateway) handleLegacyProtocol(w http.ResponseWriter, r *http.Request, t
 	} else if r.Method == MethodRDGIN {
 		legacyConnections.Inc()
 		defer legacyConnections.Dec()
+		legacyConnectionsTotal.Inc()
 
 		in, err := transport.NewLegacy(w)
 		if err != nil {
-			log.Printf("cannot hijack connection to support RDG IN data channel: %s", err)
+			logger.Error("Cannot hijack connection to support RDG IN data channel", "error", err)
 			return
 		}
 		defer in.Close()
@@ -213,14 +227,14 @@ func (g *Gateway) handleLegacyProtocol(w http.ResponseWriter, r *http.Request, t
 			t.transportIn = in
 			c.Set(t.RDGId, t, cache.DefaultExpiration)
 
-			log.Printf("Opening RDGIN for client %s", id.GetAttribute(identity.AttrClientIp))
+			logger.Info("Opening RDGIN for client", "ip", id.GetAttribute(identity.AttrClientIp))
 			in.SendAccept(false)
 
 			// read some initial data
 			in.Drain()
 
-			log.Printf("Legacy handshakeRequest done for client %s", id.GetAttribute(identity.AttrClientIp))
-			handler := NewProcessor(g, t)
+			logger.Info("Legacy handshakeRequest done for client", "ip", id.GetAttribute(identity.AttrClientIp))
+			handler := NewProcessor(g, t, g.logger.With("id", t.Id, "connection-id", t.RDGId, "protocol", "websocket"))
 			RegisterTunnel(t, handler)
 			defer RemoveTunnel(t)
 			handler.Process(r.Context())

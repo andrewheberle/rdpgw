@@ -2,22 +2,24 @@ package web
 
 import (
 	"context"
-        "errors"
-        "github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"time"
+
+	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
 	"github.com/bolkedebruin/rdpgw/shared/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-        "log"
-	"net"
-        "net/http"
-        "time"
 )
 
 type ntlmAuthMode uint32
+
 const (
-        authNone ntlmAuthMode = iota
-        authNTLM
-        authNegotiate
+	authNone ntlmAuthMode = iota
+	authNTLM
+	authNegotiate
 )
 
 type NTLMAuthHandler struct {
@@ -26,12 +28,12 @@ type NTLMAuthHandler struct {
 }
 
 func (h *NTLMAuthHandler) NTLMAuth(next http.HandlerFunc) http.HandlerFunc {
-        return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		authPayload, authMode, err := h.getAuthPayload(r)
-                if err != nil {
-                        log.Printf("Failed parsing auth header: %s", err)
+		if err != nil {
+			log.Printf("Failed parsing auth header: %s", err)
 			h.requestAuthenticate(w)
-                        return
+			return
 		}
 
 		authenticated, username := h.authenticate(w, r, authPayload, authMode)
@@ -44,10 +46,10 @@ func (h *NTLMAuthHandler) NTLMAuth(next http.HandlerFunc) http.HandlerFunc {
 			id.SetAuthTime(time.Now())
 			next.ServeHTTP(w, identity.AddToRequestCtx(id, r))
 		}
-        }
+	}
 }
 
-func (h *NTLMAuthHandler) getAuthPayload (r *http.Request) (payload string, authMode ntlmAuthMode, err error) {
+func (h *NTLMAuthHandler) getAuthPayload(r *http.Request) (payload string, authMode ntlmAuthMode, err error) {
 	authorisationEncoded := r.Header.Get("Authorization")
 	if authorisationEncoded[0:5] == "NTLM " {
 		return authorisationEncoded[5:], authNTLM, nil
@@ -58,13 +60,13 @@ func (h *NTLMAuthHandler) getAuthPayload (r *http.Request) (payload string, auth
 	return "", authNone, errors.New("Invalid NTLM Authorisation header")
 }
 
-func (h *NTLMAuthHandler) requestAuthenticate (w http.ResponseWriter) {
+func (h *NTLMAuthHandler) requestAuthenticate(w http.ResponseWriter) {
 	w.Header().Add("WWW-Authenticate", `NTLM`)
 	w.Header().Add("WWW-Authenticate", `Negotiate`)
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 }
 
-func (h *NTLMAuthHandler) getAuthPrefix (authMode ntlmAuthMode) (prefix string) {
+func (h *NTLMAuthHandler) getAuthPrefix(authMode ntlmAuthMode) (prefix string) {
 	if authMode == authNTLM {
 		return "NTLM "
 	}
